@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#101827">
+<title>SoundBeam — Offline Audio File Transfer</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1020;--panel:#141c2e;--line:#2a3852;--text:#edf3ff;--muted:#a7b4ca;--accent:#73e0c1;--accent2:#8db7ff;--danger:#ff9d9d}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#182541,var(--bg) 55%);font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;color:var(--text)}
+main{max-width:900px;margin:auto;padding:28px 16px 60px}.hero{text-align:center;padding:20px 0 24px}.logo{font-size:42px}.hero h1{margin:4px 0;font-size:clamp(2rem,7vw,3rem);letter-spacing:-1px}.hero p{color:var(--muted);margin:8px auto;max-width:600px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr));gap:16px}.card{background:rgba(20,28,46,.94);border:1px solid var(--line);border-radius:18px;padding:20px;box-shadow:0 14px 45px #0002}.card h2{margin:0 0 8px;font-size:1.25rem}.sub{color:var(--muted);font-size:.92rem;margin:0 0 16px}
+label{display:block;font-weight:650;margin:12px 0 6px}input[type=file]{width:100%;padding:12px;border:1px dashed #526783;border-radius:12px;background:#0c1424;color:var(--text)}
+button,.filebtn{border:0;border-radius:12px;padding:12px 15px;font-weight:750;cursor:pointer;background:var(--accent);color:#092019;font-size:1rem}button.secondary{background:#253651;color:var(--text);border:1px solid #405574}button:disabled{opacity:.45;cursor:not-allowed}.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:14px}.status{background:#0b1425;border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:14px;min-height:48px;color:var(--muted);overflow-wrap:anywhere}.status strong{color:var(--text)}.meter{height:8px;border-radius:9px;background:#26344c;overflow:hidden;margin-top:10px}.meter span{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .15s}
+.notice{margin-top:16px;border:1px solid #655a35;background:#292516;color:#f6e7ae;padding:13px 15px;border-radius:12px;font-size:.9rem}.steps{color:var(--muted);padding-left:20px}.steps li{margin:7px 0}footer{color:var(--muted);font-size:.85rem;text-align:center;margin-top:22px}a{color:var(--accent2)}.small{font-size:.85rem;color:var(--muted)}.pill{display:inline-block;border:1px solid #405574;border-radius:99px;padding:3px 9px;color:var(--accent);font-size:.78rem;margin-bottom:10px}
+</style>
+</head>
+<body>
+<main>
+<header class="hero">
+  <div class="logo">🔊</div>
+  <div class="pill">OFFLINE · AUDIO · EXPERIMENTAL</div>
+  <h1>SoundBeam</h1>
+  <p>Transfer a small file from one device to another using speaker-to-microphone audio tones. No internet connection is used for the transfer.</p>
+</header>
+<div class="grid">
+<section class="card">
+<h2>📤 Send a file</h2>
+<p class="sub">Choose a small file. This prototype converts each 4-bit group into one of 16 audio tones.</p>
+<label for="file">File to send</label>
+<input id="file" type="file">
+<div class="actions">
+<button id="send" disabled>▶ Play transfer tones</button>
+<button id="stopSend" class="secondary" disabled>Stop</button>
+</div>
+<div class="status" id="sendStatus" role="status">Choose a file to begin.</div>
+<div class="meter"><span id="sendMeter"></span></div>
+<p class="small">Keep the sender volume moderate and the devices close together. The audio will be audible.</p>
+</section>
+<section class="card">
+<h2>📥 Receive a file</h2>
+<p class="sub">Start listening on this device first, then press Play on the sender device.</p>
+<div class="actions">
+<button id="listen">🎙 Start microphone</button>
+<button id="stopListen" class="secondary" disabled>Stop listening</button>
+</div>
+<div class="status" id="recvStatus" role="status">Waiting for microphone permission.</div>
+<div class="meter"><span id="recvMeter"></span></div>
+<div id="downloadArea"></div>
+<p class="small">Use Chrome or Edge over HTTPS (or localhost). Allow microphone access when prompted.</p>
+</section>
+</div>
+<div class="notice"><strong>Prototype limits:</strong> This is a proof of concept, not a polished high-speed modem. Audio transfer is slow and sensitive to room noise, device audio processing, and timing. Start with files under 1 KB. For private or important files, use a trusted transfer method instead.</div>
+<section class="card" style="margin-top:16px">
+<h2>How to test with two devices</h2>
+<ol class="steps">
+<li>Publish this page on GitHub Pages (HTTPS), or run it locally on both devices.</li>
+<li>On the receiving phone, tap <b>Start microphone</b> and allow access.</li>
+<li>On the sending phone, choose a small file and tap <b>Play transfer tones</b>.</li>
+<li>Keep the speaker near the receiving microphone. If it fails, try a quieter room and a smaller file.</li>
+</ol>
+<p class="small">The receiver looks for a sync sequence, then decodes the file name, file length, and bytes. A checksum detects corrupted transfers.</p>
+</section>
+<footer>SoundBeam • Browser-based demo • No upload server</footer>
+</main>
+<script>
+(() => {
+  // 16-FSK: each symbol represents 4 bits. Symbol timing is deliberately conservative.
+  const FREQS = Array.from({length:16}, (_,i) => 1100 + i*115);
+  const SYMBOL_MS = 90;
+  const GAP_MS = 0;
+  const PREAMBLE = [0,15,0,15,0,15,3,12,5,10,6,9,1,14,2,13];
+  const MAGIC = [0x53,0x42,0x31]; // "SB1"
+  const fileInput = document.getElementById('file');
+  const sendBtn = document.getElementById('send');
+  const stopSendBtn = document.getElementById('stopSend');
+  const listenBtn = document.getElementById('listen');
+  const stopListenBtn = document.getElementById('stopListen');
+  const sendStatus = document.getElementById('sendStatus');
+  const recvStatus = document.getElementById('recvStatus');
+  const sendMeter = document.getElementById('sendMeter');
+  const recvMeter = document.getElementById('recvMeter');
+  const downloadArea = document.getElementById('downloadArea');
+  let txContext = null, txOsc = null, txGain = null, txStop = false;
+  let rxContext = null, analyser = null, micStream = null, rxTimer = null;
+  let listening = false, rxBusy = false, symbols = [], lastSymbol = -1, sameCount = 0, startedAt = 0;
+  let rxState = 'sync', rxNibbles = [], expectedBytes = null, packetBytes = [], lastValidAt = 0;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const setStatus = (el, text) => { el.textContent = text; };
+  const bytesToNibbles = bytes => { const out=[]; for(const b of bytes){out.push(b>>4,b&15)} return out; };
+  const nibblesToBytes = ns => { const out=new Uint8Array(Math.floor(ns.length/2)); for(let i=0;i<out.length;i++) out[i]=(ns[i*2]<<4)|ns[i*2+1]; return out; };
+  const u32 = n => [(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255];
+  function crc32(bytes) {
+    let c = 0xffffffff;
+    for (const b of bytes) { c ^= b; for(let k=0;k<8;k++) c = (c>>>1) ^ (0xedb88320 & -(c&1)); }
+    return (c ^ 0xffffffff) >>> 0;
+  }
+  function makePacket(fileBytes, name) {
+    const enc = new TextEncoder();
+    const nameBytes = enc.encode(name.slice(0,100));
+    const head = new Uint8Array([...MAGIC, nameBytes.length, ...u32(fileBytes.length), ...nameBytes]);
+    const body = new Uint8Array(head.length + fileBytes.length + 4);
+    body.set(head,0); body.set(fileBytes,head.length);
+    const c = crc32(body.subarray(0,head.length+fileBytes.length));
+    body.set(u32(c),head.length+fileBytes.length);
+    return body;
+  }
+  async function startTx() {
+    const file = fileInput.files[0]; if(!file) return;
+    if(file.size > 1024*1024) { setStatus(sendStatus,'For this prototype, please choose a file under 1 MB. Smaller files are much more reliable.'); return; }
+    sendBtn.disabled = true; stopSendBtn.disabled = false; txStop = false;
+    try {
+      const fileBytes = new Uint8Array(await file.arrayBuffer());
+      const packet = makePacket(fileBytes, file.name);
+      const nibbles = [...PREAMBLE, ...bytesToNibbles(packet)];
+      txContext = new (window.AudioContext || window.webkitAudioContext)();
+      await txContext.resume();
+      txGain = txContext.createGain(); txGain.gain.value = 0.0001; txGain.connect(txContext.destination);
+      txOsc = txContext.createOscillator(); txOsc.type = 'sine'; txOsc.frequency.value = FREQS[0]; txOsc.connect(txGain); txOsc.start();
+      const start = txContext.currentTime + 0.25;
+      const dur = SYMBOL_MS/1000;
+      txGain.gain.setValueAtTime(0.0001, start);
+      txGain.gain.setValueAtTime(0.22, start+0.02);
+      for(let i=0;i<nibbles.length;i++) {
+        if(txStop) break;
+        const t = start + i*dur;
+        txOsc.frequency.setValueAtTime(FREQS[nibbles[i]], t);
+        txGain.gain.setValueAtTime(0.22, t);
+        if(i%2===0) {
+          const pct = Math.round(i/nibbles.length*100);
+          sendMeter.style.width = pct+'%';
+          setStatus(sendStatus,`Transmitting ${file.name} · ${pct}% · ${i}/${nibbles.length} symbols`);
+        }
+        // Yield periodically while the Web Audio clock continues precisely.
+        if(i%25===0) await sleep(2);
+      }
+      const end = start + nibbles.length*dur;
+      txGain.gain.setTargetAtTime(0.0001, end, 0.015);
+      await sleep(Math.max(0,(end-txContext.currentTime)*1000)+80);
+      setStatus(sendStatus, txStop ? 'Transfer stopped.' : 'Audio transmission finished. Check the receiving device.');
+      sendMeter.style.width = txStop ? '0%' : '100%';
+    } catch(e) { setStatus(sendStatus,'Could not transmit: '+e.message); }
+    finally { cleanupTx(); sendBtn.disabled = !fileInput.files.length; stopSendBtn.disabled = true; }
+  }
+  function cleanupTx() { try{txOsc?.stop()}catch{} try{txContext?.close()}catch{} txContext=null;txOsc=null;txGain=null; }
+  fileInput.addEventListener('change',()=>{sendBtn.disabled=!fileInput.files.length; if(fileInput.files[0])setStatus(sendStatus,`${fileInput.files[0].name} · ${fileInput.files[0].size} bytes`);});
+  sendBtn.addEventListener('click',startTx);
+  stopSendBtn.addEventListener('click',()=>{txStop=true;stopSendBtn.disabled=true;});
+
+  async function startRx() {
+    if(listening) return;
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+      rxContext = new (window.AudioContext || window.webkitAudioContext)();
+      await rxContext.resume();
+      const source = rxContext.createMediaStreamSource(micStream);
+      analyser = rxContext.createAnalyser(); analyser.fftSize = 8192; analyser.smoothingTimeConstant = 0.05;
+      source.connect(analyser);
+      listening = true; listenBtn.disabled=true; stopListenBtn.disabled=false;
+      rxState='sync'; rxNibbles=[]; expectedBytes=null; packetBytes=[]; lastValidAt=0;
+      symbols=[]; lastSymbol=-1; sameCount=0; startedAt=performance.now();
+      setStatus(recvStatus,'Listening… Start the sender now. Keep the devices close and avoid other sounds.');
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      let currentRun = [], runStart = performance.now(), lastSample = 0;
+      // Sample dominant FSK frequency; stable runs become decoded symbols.
+      rxTimer = setInterval(() => {
+        if(!listening || !analyser) return;
+        analyser.getByteFrequencyData(data);
+        let bestI=-1,best=-1;
+        for(let i=0;i<FREQS.length;i++){
+          const bin=Math.round(FREQS[i]*analyser.fftSize/rxContext.sampleRate);
+          let power=0; for(let j=Math.max(0,bin-1);j<=Math.min(data.length-1,bin+1);j++) power=Math.max(power,data[j]);
+          if(power>best){best=power;bestI=i;}
+        }
+        const now=performance.now();
+        // Ignore weak background energy.
+        if(best < 35) { lastSample=now; return; }
+        if(bestI===lastSymbol) sameCount++; else { lastSymbol=bestI; sameCount=1; runStart=now; }
+        // A symbol is accepted once per ~symbol duration, using the middle of its stable run.
+        if(sameCount===4 && now-runStart > 20) {
+          const symbol = bestI;
+          onSymbol(symbol);
+          lastValidAt=now;
+          sameCount=0; runStart=now;
+        }
+      }, 8);
+    } catch(e) { setStatus(recvStatus,'Microphone unavailable: '+e.message+'. Use HTTPS and allow microphone access.'); stopRx(); }
+  }
+  function onSymbol(s) {
+    if(rxState==='sync') {
+      symbols.push(s); if(symbols.length>PREAMBLE.length) symbols.shift();
+      if(symbols.length===PREAMBLE.length && PREAMBLE.every((v,i)=>symbols[i]===v)) {
+        rxState='data'; rxNibbles=[]; packetBytes=[]; expectedBytes=null;
+        setStatus(recvStatus,'Sync found! Receiving data…'); recvMeter.style.width='3%'; symbols=[];
+      }
+      return;
+    }
+    rxNibbles.push(s);
+    if(rxNibbles.length%2===0) {
+      const b=(rxNibbles[rxNibbles.length-2]<<4)|rxNibbles[rxNibbles.length-1];
+      packetBytes.push(b);
+      if(packetBytes.length===8) {
+        if(packetBytes[0]!==0x53||packetBytes[1]!==0x42||packetBytes[2]!==0x31) { resetRx('Header not recognized. Retry with the sender closer to the microphone.'); return; }
+        const nameLen=packetBytes[3];
+        const len=((packetBytes[4]<<24)|(packetBytes[5]<<16)|(packetBytes[6]<<8)|packetBytes[7])>>>0;
+        expectedBytes = 8 + nameLen + len + 4;
+        if(len>1024*1024 || nameLen>100) { resetRx('File header looks invalid. Please retry with a smaller file.'); return; }
+      }
+      if(packetBytes.length>=8 && expectedBytes===null) {
+        const nameLen=packetBytes[3];
+        const len=((packetBytes[4]<<24)|(packetBytes[5]<<16)|(packetBytes[6]<<8)|packetBytes[7])>>>0;
+        expectedBytes=8+nameLen+len+4;
+      }
+      if(expectedBytes && packetBytes.length>=expectedBytes) finishPacket();
+      else if(packetBytes.length>0) recvMeter.style.width=Math.min(95,packetBytes.length/Math.max(1,expectedBytes||1000)*100)+'%';
+    }
+  }
+  function resetRx(msg) { rxState='sync'; symbols=[];rxNibbles=[];packetBytes=[];expectedBytes=null;setStatus(recvStatus,msg+' Listening again…'); }
+  function finishPacket() {
+    const all = new Uint8Array(packetBytes);
+    const nameLen=all[3], len=((all[4]<<24)|(all[5]<<16)|(all[6]<<8)|all[7])>>>0;
+    const nameStart=8, dataStart=nameStart+nameLen, crcStart=dataStart+len;
+    const name=new TextDecoder().decode(all.subarray(nameStart,dataStart));
+    const fileBytes=all.slice(dataStart,crcStart);
+    const got=((all[crcStart]<<24)|(all[crcStart+1]<<16)|(all[crcStart+2]<<8)|all[crcStart+3])>>>0;
+    const expected=crc32(all.subarray(0,crcStart));
+    if(got!==expected) { resetRx('Checksum failed: audio was corrupted. Try again in a quieter room.'); return; }
+    const blob=new Blob([fileBytes],{type:'application/octet-stream'});
+    const url=URL.createObjectURL(blob);
+    downloadArea.innerHTML='';
+    const a=document.createElement('a'); a.href=url; a.download=name||'received-file.bin'; a.textContent='⬇ Download '+(name||'received file');
+    a.style.display='inline-block';a.style.marginTop='12px';a.style.padding='10px 13px';a.style.borderRadius='10px';a.style.background='#73e0c1';a.style.color='#092019';a.style.fontWeight='800';a.style.textDecoration='none';
+    downloadArea.appendChild(a);
+    setStatus(recvStatus,`Received ${name} · ${len} bytes · checksum OK`); recvMeter.style.width='100%';
+    rxState='sync';symbols=[];rxNibbles=[];packetBytes=[];expectedBytes=null;
+  }
+  function stopRx() {
+    listening=false; clearInterval(rxTimer); rxTimer=null;
+    try{micStream?.getTracks().forEach(t=>t.stop())}catch{} try{rxContext?.close()}catch{}
+    micStream=null;rxContext=null;analyser=null;
+    listenBtn.disabled=false;stopListenBtn.disabled=true;
+  }
+  listenBtn.addEventListener('click',startRx);
+  stopListenBtn.addEventListener('click',()=>{stopRx();setStatus(recvStatus,'Stopped listening.');});
+  window.addEventListener('beforeunload',()=>{stopRx();cleanupTx();});
+})();
+</script>
+</body>
+</html>
